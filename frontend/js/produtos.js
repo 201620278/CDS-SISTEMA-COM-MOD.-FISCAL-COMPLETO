@@ -1106,10 +1106,8 @@ function showProdutoModal(produto = null) {
                                         class="list-group position-absolute w-100"
                                         style="z-index: 9999; display: none;"
                                     ></div>
-                                    <div class="col-12">
 
-                                <div class="col-12">
-                                    <div class="row g-3 border rounded p-3 mb-2 bg-light">
+                                <div class="row g-3 border rounded p-3 mb-2 bg-light">
                                         <div class="col-md-12">
                                             <div class="form-check">
                                                 <input
@@ -2644,6 +2642,96 @@ async function gerarSugestoesAvancado() {
 window.gerarSugestoesAvancado = gerarSugestoesAvancado;
 
 /**
+ * Formata motivo, cor do badge e info de dias para uma sugestão de promoção
+ */
+function formatarMotivoSugestao(s) {
+    const diasParaVencer = s.dias_para_vencer;
+    const temValidade = diasParaVencer !== null && diasParaVencer !== undefined && Number(diasParaVencer) >= -999999;
+
+    if (temValidade) {
+        const dias = Number(diasParaVencer);
+        let corBadge = 'bg-danger';
+        let motivoText = '🔵 Vence em até 30 dias';
+        let diasInfo = '';
+
+        if (dias < 0) {
+            corBadge = 'bg-dark';
+            motivoText = '🔴 Produto Vencido';
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-hourglass-end"></i> Venceu há ${Math.abs(dias)} dia(s)</small>`;
+        } else if (dias === 0) {
+            corBadge = 'bg-danger';
+            motivoText = '🔴 Vence Hoje';
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-exclamation-triangle"></i> Vence hoje!</small>`;
+        } else if (dias <= 3) {
+            corBadge = 'bg-danger';
+            motivoText = '🔴 Vence em até 3 dias';
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-hourglass-end"></i> ${dias} dia(s) para vencer</small>`;
+        } else if (dias <= 7) {
+            corBadge = 'bg-warning';
+            motivoText = '🟠 Vence em até 7 dias';
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-hourglass-end"></i> ${dias} dia(s) para vencer</small>`;
+        } else if (dias <= 30) {
+            corBadge = 'bg-info';
+            motivoText = '🔵 Vence em até 30 dias';
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-hourglass-end"></i> ${dias} dia(s) para vencer</small>`;
+        }
+
+        return {
+            motivoBadge: `<span class="badge ${corBadge}">${escapeHtml(motivoText)}</span>`,
+            diasInfo
+        };
+    }
+
+    let motivoText = (s.motivo || '').toString();
+    let corBadge = 'bg-info';
+    let diasInfo = '';
+
+    if (/Nunca Vendeu/i.test(motivoText)) {
+        corBadge = 'bg-danger';
+        diasInfo = `<br><small class="text-muted"><i class="fas fa-ban"></i> Nunca houve venda</small>`;
+    } else if (/Encalhado/i.test(motivoText)) {
+        corBadge = 'bg-danger';
+        if (s.dias_sem_venda !== null && s.dias_sem_venda !== undefined) {
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-hourglass-half"></i> ${Number(s.dias_sem_venda)} dias sem venda</small>`;
+        } else {
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-hourglass-half"></i> Sem giro há muito tempo</small>`;
+        }
+    } else if (/Parado/i.test(motivoText)) {
+        corBadge = 'bg-secondary';
+        if (s.dias_sem_venda !== null && s.dias_sem_venda !== undefined) {
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-ban"></i> ${Number(s.dias_sem_venda)} dias sem venda</small>`;
+        } else {
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-ban"></i> Sem vendas recentes</small>`;
+        }
+    } else if (/Giro Baixo/i.test(motivoText)) {
+        corBadge = 'bg-warning';
+        if (s.dias_sem_venda !== null && s.dias_sem_venda !== undefined) {
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-chart-line"></i> ${Number(s.dias_sem_venda)} dias sem venda</small>`;
+        } else {
+            diasInfo = `<br><small class="text-muted"><i class="fas fa-chart-line"></i> Giro baixo</small>`;
+        }
+    } else if (s.dias_sem_venda !== null && s.dias_sem_venda !== undefined) {
+        const diasSemVenda = Number(s.dias_sem_venda);
+        if (diasSemVenda >= 60) {
+            corBadge = 'bg-danger';
+            motivoText = motivoText || '🔴 Produto Encalhado';
+        } else if (diasSemVenda >= 30) {
+            corBadge = 'bg-secondary';
+            motivoText = motivoText || '⚫ Produto Parado';
+        } else if (diasSemVenda >= 15) {
+            corBadge = 'bg-warning';
+            motivoText = motivoText || '🟡 Giro Baixo';
+        }
+        diasInfo = `<br><small class="text-muted"><i class="fas fa-calendar"></i> ${diasSemVenda} dias sem venda</small>`;
+    }
+
+    return {
+        motivoBadge: `<span class="badge ${corBadge}">${escapeHtml(motivoText || 'Sugestão de promoção')}</span>`,
+        diasInfo
+    };
+}
+
+/**
  * Carrega sugestões de promoções
  */
 async function carregarSugestoesPromocoes(autoGerar = false) {
@@ -2696,14 +2784,15 @@ async function carregarSugestoesPromocoes(autoGerar = false) {
 
         sugestoes.forEach(s => {
             const desconto = Number(s.desconto_percentual || 0).toFixed(2);
-            const diasInfo = s.dias_para_vencer ? `<br><small class="text-muted">${s.dias_para_vencer} dias para vencer</small>` : '';
+            const { motivoBadge, diasInfo } = formatarMotivoSugestao(s);
+            
             html += `
                 <tr>
                     <td>
                         <strong>${escapeHtml(s.nome_produto || '-')}</strong>
                         ${diasInfo}
                     </td>
-                    <td><span class="badge bg-warning">${s.motivo.replace(/_/g, ' ')}</span></td>
+                    <td>${motivoBadge}</td>
                     <td>${escapeHtml(s.estoque_atual || 0)}</td>
                     <td>${formatCurrency(s.preco_atual || 0)}</td>
                     <td><span class="badge bg-danger">${desconto}%</span></td>
@@ -2907,7 +2996,10 @@ async function abrirModalConfirmarSugestao(sugestao) {
                             <div class="col-md-6">
                                 <label class="form-label"><strong>Motivo</strong></label>
                                 <p class="form-control-static">
-                                    <span class="badge bg-info">${sugestao.motivo.replace(/_/g, ' ')}</span>
+                                    ${(() => {
+                                        const { motivoBadge, diasInfo } = formatarMotivoSugestao(sugestao);
+                                        return motivoBadge + diasInfo;
+                                    })()}
                                 </p>
                             </div>
                         </div>
@@ -3122,6 +3214,7 @@ async function encerrarPromocao(promocaoId) {
         }
 
         showNotification('Promoção encerrada com sucesso!', 'success');
+        carregarSugestoesPromocoes();
         carregarPromocoes('ativas');
         carregarPromocoes('encerradas');
         carregarDashboardPromocoes();
@@ -3155,6 +3248,7 @@ async function verificarPromocoeExpiradas() {
         showNotification(resultado.message, 'success');
         
         // Recarregar as listas de promoções
+        carregarSugestoesPromocoes();
         carregarPromocoes('ativas');
         carregarPromocoes('encerradas');
         carregarDashboardPromocoes();

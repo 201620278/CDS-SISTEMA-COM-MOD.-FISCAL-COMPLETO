@@ -145,6 +145,7 @@ function validarSenhaAdmin(senhaAdmin, callback) {
       ).toLowerCase();
 
       const isAdmin =
+        (usuario.role && String(usuario.role).toLowerCase() === 'admin') ||
         perfilUsuario === 'admin' ||
         perfilUsuario === 'administrador' ||
         perfilUsuario === 'gerente';
@@ -152,15 +153,34 @@ function validarSenhaAdmin(senhaAdmin, callback) {
       if (!isAdmin) continue;
 
       const senhaBanco =
+        usuario.password_hash ||
         usuario.senha ||
         usuario.password ||
         usuario.senha_hash;
 
+      // Logs de diagnóstico: não registrar a senha em claro, apenas indicadores
+      try {
+        console.log(`validarSenhaAdmin: verificando usuario=${usuario.id} perfil=${perfilUsuario} temSenha=${!!senhaBanco}`);
+      } catch (e) {}
+
       if (!senhaBanco) continue;
 
-      const senhaOk = await bcrypt.compare(senhaAdmin, senhaBanco).catch(() => false);
+      let senhaOk = false;
+      try {
+        senhaOk = await bcrypt.compare(senhaAdmin, senhaBanco);
+      } catch (e) {
+        console.error('validarSenhaAdmin: erro ao comparar senha bcrypt para usuario', usuario.id, e.message || e);
+        senhaOk = false;
+      }
 
-      if (senhaOk || senhaAdmin === senhaBanco) {
+      if (senhaOk) {
+        try { console.log('validarSenhaAdmin: senha OK para usuario', usuario.id); } catch (e) {}
+        return callback(null, true);
+      }
+
+      // fallback: comparar texto puro (caso o banco contenha senha sem hash)
+      if (senhaAdmin === senhaBanco) {
+        try { console.log('validarSenhaAdmin: senha em texto igual para usuario', usuario.id); } catch (e) {}
         return callback(null, true);
       }
     }
@@ -217,6 +237,14 @@ router.get('/saldo-inicial-sugerido', (req, res) => {
 
 router.post('/abrir', verificarToken, (req, res) => {
   const valorInicial = n(req.body.valor_inicial);
+  
+  // Log de diagnóstico para investigar erros 500 do endpoint
+  try {
+    console.log('POST /api/caixa/abrir - user:', req.user ? req.user.id || req.user.username : null, 'valor_inicial:', valorInicial);
+    console.log('DB path:', db.dbPath || db.dbDir || 'desconhecido');
+  } catch (e) {
+    console.error('Erro ao logar contexto de abertura de caixa:', e);
+  }
 
   db.get(`
     SELECT id FROM caixa
@@ -246,7 +274,10 @@ router.post('/abrir', verificarToken, (req, res) => {
         ?
       )
     `, [valorInicial, req.user?.id || null], function(insertErr) {
-      if (insertErr) return res.status(500).json({ error: insertErr.message });
+      if (insertErr) {
+        console.error('Erro ao inserir registro de caixa (abrir):', insertErr, { valorInicial, user: req.user });
+        return res.status(500).json({ error: insertErr.message });
+      }
 
       const caixaId = this.lastID;
 
@@ -259,7 +290,10 @@ router.post('/abrir', verificarToken, (req, res) => {
           usuario_id
         ) VALUES (?, 'abertura', ?, 'Abertura de caixa', ?)
       `, [caixaId, valorInicial, req.user?.id || null], (movErr) => {
-        if (movErr) return res.status(500).json({ error: movErr.message });
+        if (movErr) {
+          console.error('Erro ao inserir caixa (abrir):', movErr, { valorInicial, user: req.user });
+          return res.status(500).json({ error: movErr.message });
+        }
 
         // Registrar auditoria centralizada
         gravarAuditoria({
@@ -299,7 +333,10 @@ router.post('/sangria', verificarToken, async (req, res) => {
     }
 
     if (!senhaValida) {
-      return res.status(403).json({ error: 'Senha de administrador inválida para realizar sangria.' });
+      // Retornar 400 para erro de validação da senha de administrador
+      // (403 era interpretado pelo frontend como falha de autenticação
+      // e redirecionava para a tela de login)
+      return res.status(400).json({ error: 'Senha de administrador inválida para realizar sangria.' });
     }
 
     db.get(

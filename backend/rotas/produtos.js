@@ -359,18 +359,31 @@ router.get('/promocoes/sugestoes', (req, res) => {
       p.codigo,
       p.estoque_atual,
       p.data_validade,
+      p.controlar_validade,
       p.dias_alerta_validade,
-      CAST(julianday(date(p.data_validade)) - julianday(date('now', 'localtime')) AS INTEGER) AS dias_para_vencer
+      (
+        SELECT MAX(v.created_at)
+        FROM vendas_itens vi
+        INNER JOIN vendas v ON v.id = vi.venda_id
+        WHERE vi.produto_id = p.id
+      ) AS ultima_venda
     FROM promocoes_sugestoes ps
     LEFT JOIN produtos p ON p.id = ps.produto_id
-    WHERE ps.ativo = 1 AND ps.aceito_em IS NULL AND ps.rejeitado_em IS NULL
+    LEFT JOIN promocoes pr ON pr.produto_id = p.id
+      AND pr.status = 'ativa'
+      AND date(pr.data_inicio) <= date('now', 'localtime')
+      AND date(pr.data_fim) > date('now', 'localtime')
+    WHERE ps.ativo = 1
+      AND ps.aceito_em IS NULL
+      AND ps.rejeitado_em IS NULL
+      AND pr.id IS NULL
     ORDER BY ps.criado_em DESC
   `, [], (err, rows) => {
     if (err) {
       console.error('Erro ao listar sugestões de promoções:', err.message);
       return res.status(500).json({ error: err.message });
     }
-    res.json(rows || []);
+    res.json((rows || []).map(enriquecerSugestao));
   });
 });
 
@@ -611,6 +624,108 @@ router.put('/promocoes/:id/encerrar', (req, res) => {
 });
 
 // Gerar sugestões de promoções automaticamente
+function classificarProduto(produto) {
+
+  const hoje = new Date();
+  hoje.setHours(0,0,0,0);
+
+  // calcular dias para vencer quando aplicável
+  let diasParaVencer = null;
+  if (produto.controlar_validade == 1 && produto.data_validade && produto.data_validade !== '0000-00-00') {
+    const validade = new Date(produto.data_validade);
+    validade.setHours(0,0,0,0);
+    diasParaVencer = Math.floor((validade - hoje) / 86400000);
+  }
+
+  // calcular dias desde a última venda
+  let diasSemVenda = null;
+  if (produto.ultima_venda) {
+    const ultima = new Date(produto.ultima_venda);
+    ultima.setHours(0,0,0,0);
+    diasSemVenda = Math.floor((hoje - ultima) / 86400000);
+  }
+
+  // Priorizar problemas de validade quando existir controle de validade
+  if (diasParaVencer !== null) {
+    if (diasParaVencer < 0) {
+      return { tipo: 'vencido', texto: '🔴 Produto Vencido', prioridade: 100 };
+    }
+    if (diasParaVencer === 0) {
+      return { tipo: 'vence_hoje', texto: '🔴 Vence Hoje', prioridade: 95 };
+    }
+    if (diasParaVencer <= 3) {
+      return { tipo: 'vencimento_3dias', texto: '🔴 Vence em até 3 dias', prioridade: 90 };
+    }
+    if (diasParaVencer <= 7) {
+      return { tipo: 'vencimento_7dias', texto: '🟠 Vence em até 7 dias', prioridade: 80 };
+    }
+    if (diasParaVencer <= 30) {
+      return { tipo: 'vencimento_30dias', texto: '🔵 Vence em até 30 dias', prioridade: 70 };
+    }
+  }
+
+  // Sem problema de validade importante: verificar giro / vendas
+  if (!produto.ultima_venda) {
+    return { tipo: 'sem_vendas', texto: '🔴 Nunca Vendeu', prioridade: 65 };
+  }
+
+  if (diasSemVenda >= 60) {
+    return { tipo: 'encalhado', texto: '🔴 Produto Encalhado', prioridade: 60 };
+  }
+
+  if (diasSemVenda >= 30) {
+    return { tipo: 'parado', texto: '⚫ Produto Parado', prioridade: 50 };
+  }
+
+  if (diasSemVenda >= 15) {
+    return { tipo: 'giro_baixo', texto: '🟡 Giro Baixo', prioridade: 40 };
+  }
+
+  return null;
+}
+
+// Enriquece sugestão com motivo e dias corretos (corrige registros legados)
+function enriquecerSugestao(row) {
+  const produto = {
+    controlar_validade: row.controlar_validade,
+    data_validade: row.data_validade,
+    ultima_venda: row.ultima_venda
+  };
+
+  const classificacao = classificarProduto(produto);
+  let dias_para_vencer = null;
+  let dias_sem_venda = null;
+  let motivo = row.motivo;
+
+  if (classificacao) {
+    motivo = classificacao.texto;
+
+    const hoje = new Date();
+    hoje.setHours(0, 0, 0, 0);
+
+    if (classificacao.tipo.includes('vencimento') || classificacao.tipo === 'vencido' || classificacao.tipo === 'vence_hoje') {
+      if (produto.data_validade && produto.data_validade !== '0000-00-00') {
+        const validade = new Date(produto.data_validade);
+        validade.setHours(0, 0, 0, 0);
+        dias_para_vencer = Math.floor((validade - hoje) / 86400000);
+      }
+    } else if (produto.ultima_venda) {
+      const ultima = new Date(produto.ultima_venda);
+      ultima.setHours(0, 0, 0, 0);
+      dias_sem_venda = Math.floor((hoje - ultima) / 86400000);
+    }
+  } else if (row.dias_para_vencer !== null && row.dias_para_vencer !== undefined) {
+    dias_para_vencer = row.dias_para_vencer;
+  }
+
+  return {
+    ...row,
+    motivo,
+    dias_para_vencer,
+    dias_sem_venda
+  };
+}
+
 router.post('/promocoes/gerar-sugestoes', (req, res) => {
   const { produto_ids = [], desconto_percentual = 15 } = req.body;
 
@@ -619,114 +734,131 @@ router.post('/promocoes/gerar-sugestoes', (req, res) => {
     return res.status(400).json({ error: 'Desconto deve estar entre 1% e 100%' });
   }
 
-  // Limpar sugestões antigas (mais de 30 dias)
+  // Limpar TODAS as sugestões antigas para regenerar com critérios corretos
   db.run(`
     DELETE FROM promocoes_sugestoes 
     WHERE ativo = 1 
       AND aceito_em IS NULL 
-      AND rejeitado_em IS NULL 
-      AND julianday('now') - julianday(criado_em) > 30
+      AND rejeitado_em IS NULL
   `, (deleteErr) => {
-    if (deleteErr) {
-      console.error('Erro ao limpar sugestões antigas:', deleteErr.message);
-    }
+    if (deleteErr) console.error('Erro ao limpar sugestões antigas:', deleteErr.message);
   });
 
-  // Determinar quais produtos processar
+  // Consulta simplificada incluindo data da última venda e EXCLUINDO produtos com promoção ativa
+  let params = [];
   let query = `
-    SELECT DISTINCT p.id
+    SELECT
+      p.id,
+      p.nome,
+      p.codigo,
+      p.estoque_atual,
+      p.preco_venda,
+      p.controlar_validade,
+      p.data_validade,
+      (
+        SELECT MAX(v.created_at)
+        FROM vendas_itens vi
+        INNER JOIN vendas v ON v.id = vi.venda_id
+        WHERE vi.produto_id = p.id
+      ) AS ultima_venda
     FROM produtos p
-    WHERE 
-      p.controlar_validade = 1 
-      AND p.data_validade IS NOT NULL 
-      AND p.data_validade != ''
-      AND date(p.data_validade) >= date('now', 'localtime')
-      AND CAST(julianday(date(p.data_validade)) - julianday(date('now', 'localtime')) AS INTEGER) <= COALESCE(NULLIF(p.dias_alerta_validade, 0), 30)
-      AND p.id NOT IN (
-        SELECT produto_id FROM promocoes_sugestoes 
-        WHERE motivo = 'vencimento_proximo' 
-          AND ativo = 1 
-          AND aceito_em IS NULL 
-          AND rejeitado_em IS NULL
-      )
+    LEFT JOIN promocoes pr ON pr.produto_id = p.id 
+      AND pr.status = 'ativa' 
+      AND DATE(pr.data_inicio) <= DATE('now')
+      AND DATE(pr.data_fim) > DATE('now')
+    WHERE
+      p.ativo = 1
+      AND p.estoque_atual > 0
+      AND pr.id IS NULL
   `;
 
-  // Se foram selecionados produtos específicos, filtrar apenas eles
   if (Array.isArray(produto_ids) && produto_ids.length > 0) {
     const placeholders = produto_ids.map(() => '?').join(',');
     query += ` AND p.id IN (${placeholders})`;
+    params = produto_ids;
   }
 
-  db.all(query, produto_ids, (err, produtos) => {
+  db.all(query, params, (err, produtos) => {
     if (err) {
       console.error('Erro ao buscar produtos para sugestão:', err.message);
       return res.status(500).json({ error: err.message });
     }
 
     if (!produtos || produtos.length === 0) {
-      return res.json({ 
-        message: 'Nenhuma sugestão gerada. Nenhum produto com validade próxima encontrado.',
-        total: 0 
-      });
+      return res.json({ message: 'Nenhuma sugestão gerada. Nenhum produto elegível encontrado.', total: 0 });
     }
 
-    let inseridas = 0;
-    const totalProdutos = produtos.length;
-    let processados = 0;
+    const sugestoes = [];
 
-    produtos.forEach(p => {
-      db.all(`
-        SELECT 
-          id,
-          nome,
-          preco_venda,
-          estoque_atual,
-          data_validade,
-          dias_alerta_validade
-        FROM produtos 
-        WHERE id = ?
-      `, [p.id], (err2, rows) => {
-        processados++;
+    for (const produto of produtos) {
+      const classificacao = classificarProduto(produto);
+      if (classificacao) {
+        // Calcular dias_para_vencer OU dias_sem_venda baseado na classificação
+        let dias_para_vencer = null;
+        let dias_sem_venda = null;
 
-        if (err2 || !rows || rows.length === 0) {
-          if (processados === totalProdutos) {
-            res.json({ 
-              message: `Sugestões geradas com sucesso. Total: ${inseridas}`,
-              total: inseridas 
-            });
+        // Se é classificação de validade, calcular dias_para_vencer
+        if (classificacao.tipo.includes('vencimento') || classificacao.tipo === 'vencido' || classificacao.tipo === 'vence_hoje') {
+          if (produto.data_validade && produto.data_validade !== '0000-00-00') {
+            const hoje = new Date();
+            hoje.setHours(0,0,0,0);
+            const validade = new Date(produto.data_validade);
+            validade.setHours(0,0,0,0);
+            dias_para_vencer = Math.floor((validade - hoje) / 86400000);
           }
-          return;
+        } else {
+          // Se é classificação de vendas, calcular dias_sem_venda
+          if (produto.ultima_venda) {
+            const hoje = new Date();
+            hoje.setHours(0,0,0,0);
+            const ultima = new Date(produto.ultima_venda);
+            ultima.setHours(0,0,0,0);
+            dias_sem_venda = Math.floor((hoje - ultima) / 86400000);
+          }
         }
 
-        const prod = rows[0];
-        const diasParaVencer = Math.floor(
-          (new Date(prod.data_validade) - new Date()) / (1000 * 60 * 60 * 24)
-        );
-
-        const preco_sugerido = (prod.preco_venda * (1 - desconto_percentual / 100)).toFixed(2);
-
-        db.run(`
-          INSERT INTO promocoes_sugestoes (
-            produto_id,
-            motivo,
-            dias_para_vencer,
-            estoque_atual,
-            preco_atual,
-            preco_sugerido,
-            desconto_percentual,
-            ativo
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-        `, [p.id, 'vencimento_proximo', diasParaVencer, prod.estoque_atual, prod.preco_venda, preco_sugerido, desconto_percentual], (insertErr) => {
-          if (!insertErr) inseridas++;
-
-          // Se é o último produto, enviar resposta
-          if (processados === totalProdutos) {
-            res.json({ 
-              message: `Sugestões geradas com sucesso. Total: ${inseridas}`,
-              total: inseridas 
-            });
-          }
+        sugestoes.push({
+          produto_id: produto.id,
+          nome: produto.nome,
+          estoque_atual: produto.estoque_atual,
+          tipo: classificacao.tipo,
+          motivo: classificacao.texto,
+          prioridade: classificacao.prioridade,
+          data_validade: produto.data_validade,
+          ultima_venda: produto.ultima_venda,
+          preco_atual: produto.preco_venda,
+          dias_para_vencer: dias_para_vencer,
+          dias_sem_venda: dias_sem_venda
         });
+      }
+    }
+
+    // Ordenar por prioridade (desc)
+    sugestoes.sort((a,b) => b.prioridade - a.prioridade);
+
+    if (sugestoes.length === 0) {
+      return res.json({ message: 'Nenhuma sugestão gerada após classificação.', total: 0 });
+    }
+
+    // Inserir sugestões na tabela
+    let inseridas = 0;
+    let processed = 0;
+
+    sugestoes.forEach(s => {
+      const preco_sugerido = null; // calculo opcional
+      
+      db.run(`
+        INSERT INTO promocoes_sugestoes (
+          produto_id, motivo, dias_para_vencer, estoque_atual, preco_atual, preco_sugerido, desconto_percentual, ativo
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `, [s.produto_id, s.motivo, s.dias_para_vencer, s.estoque_atual, s.preco_atual, preco_sugerido, desconto_percentual], (insertErr) => {
+        processed++;
+        if (!insertErr) inseridas++;
+        else console.error('Erro ao inserir sugestão:', insertErr.message);
+
+        if (processed === sugestoes.length) {
+          return res.json({ message: `Sugestões geradas com sucesso. Total: ${inseridas}`, total: inseridas });
+        }
       });
     });
   });

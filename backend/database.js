@@ -98,6 +98,7 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN diferenca DECIMAL(10,2) DEFAULT 0`);
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN observacao TEXT`);
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN aberto_em DATETIME`);
+  aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN aberto_por INTEGER REFERENCES usuarios(id)`);
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN fechado_em DATETIME`);
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN fechado_por INTEGER REFERENCES usuarios(id)`);
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN ja_reimpresso INTEGER DEFAULT 0`);

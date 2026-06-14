@@ -1983,6 +1983,10 @@ function abrirPagamentoMisto() {
 }
 
 function mostrarModalCpfCnpjNota() {
+    const cpfPreenchido = clienteSelecionado?.cpf_cnpj
+        ? formatarCpfCnpj(clienteSelecionado.cpf_cnpj)
+        : '';
+
     $('#modal-container').html(`
         <div class="modal fade" id="cpfCnpjNotaModal" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-sm modal-dialog-centered">
@@ -2001,6 +2005,7 @@ function mostrarModalCpfCnpjNota() {
                             placeholder="Opcional"
                             maxlength="18"
                             autocomplete="off"
+                            value="${escapeHtml(cpfPreenchido)}"
                         >
 
                         <small class="text-muted d-block mt-2">
@@ -3667,8 +3672,9 @@ function confirmarTroco() {
 }
 
 function mostrarModalDecisaoFiscal() {
-    if (!pdvModoFiscalAtivo()) {
-        executarFinalizacaoVenda(false, null, formaPagamentoSelecionadaPDV);
+    // Modo fiscal ativo: emite NFC-e automaticamente, mas solicita CPF/CNPJ antes
+    if (pdvModoFiscalAtivo()) {
+        mostrarModalCpfCnpjNota();
         return;
     }
 
